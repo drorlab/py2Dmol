@@ -1,4 +1,5 @@
 import json
+from turtle import color
 import numpy as np
 from IPython.display import display, HTML, Javascript
     
@@ -8,6 +9,7 @@ import gemmi
 import uuid
 import os
 import urllib.request
+
 
 def kabsch(a, b, return_v=False):
   """Computes the optimal rotation matrix for aligning a to b."""
@@ -237,10 +239,12 @@ class view:
                     } for frame in py_obj["frames"]
                 ]
                 
+
                 serialized_objects.append({
                     "name": py_obj.get("name"),
                     "chains": static_chains,
                     "atom_types": static_atom_types,
+                    "color": py_obj.get("color"),  # NEW JKARA
                     # "pae": None, # (REMOVED)
                     "frames": light_frames # This list is much smaller
                 })
@@ -316,8 +320,9 @@ class view:
         self._pae = None
         self._is_live = False
 
-    def new_obj(self, object_name=None):
+    def new_obj(self, object_name=None, color=None):
         """Starts a new object for subsequent 'add' calls."""
+        ## NEW: UPDATED JKARA
         
         # This is a new object, reset the alignment reference
         self._coords = None 
@@ -333,14 +338,16 @@ class view:
         self._current_object_data = [] # List to hold frames
         self.objects.append({
             "name": object_name,
-            "frames": self._current_object_data
+            "frames": self._current_object_data,
+            "color": color  # Store color setting
         })
         
         # Send message *only if* in dynamic/hybrid mode and already displayed
         if self._is_live:
             self._send_message({
                 "type": "py2DmolNewObject",
-                "name": object_name
+                "name": object_name,
+                "color": color # NEW JKARA
             })
     
     def add(self, coords, plddts=None, chains=None, atom_types=None, pae=None,
@@ -384,14 +391,12 @@ class view:
             })
 
 
-    def add_pdb(self, filepath, chains=None, new_obj=False, object_name=None, pae=None, align=True, use_biounit=False, biounit_name="1", ignore_ligands=False):
+    def add_pdb(self, filepath, chains=None, new_obj=False, object_name=None, 
+                pae=None, align=True, use_biounit=False, biounit_name="1", 
+                ignore_ligands=False, color=None):
         """
         Loads a structure from a local PDB or CIF file and adds it to the viewer
         as a new frame (or object).
-        
-        This method does *not* call .show().
-        
-        Multi-model files are added as a single object.
         
         Args:
             filepath (str): Path to the PDB or CIF file.
@@ -402,11 +407,34 @@ class view:
             use_biounit (bool): If True, attempts to generate the biological assembly.
             biounit_name (str): The name of the assembly to generate (default "1").
             ignore_ligands (bool): If True, skips loading ligand atoms.
+            color (str, optional): Color mode for this object ('auto', 'chain', 'rainbow', 
+                                'plddt', or a hex color like '#FF5733'). 
+                                If None, uses global viewer color setting.
         """
         
-        # --- Handle new_obj logic FIRST ---
+        # # --- Handle new_obj logic FIRST ---
+        # if new_obj or not self.objects:
+        #     self.new_obj(object_name, color=color)
+        # # NEW JKARA
+        # else:
+        #     # If not creating a new object, but color was specified, update the current object's color
+        #     if color is not None:
+        #         self.objects[-1]["color"] = color
+        
+        # current_obj_name = self.objects[-1]["name"]
+
+        # --- Handle new_obj logic ---
+        # If color is specified and we have objects, force creation of a new object
+        # to preserve per-structure colors
+        if color is not None and self.objects and not new_obj:
+            new_obj = True  # Auto-create new object when color is specified
+        
         if new_obj or not self.objects:
-             self.new_obj(object_name)
+            self.new_obj(object_name, color=color)
+        else:
+            # Adding to existing object - update its color if specified
+            if color is not None:
+                self.objects[-1]["color"] = color
         
         current_obj_name = self.objects[-1]["name"]
 
@@ -416,7 +444,7 @@ class view:
         except Exception as e:
             print(f"Error reading structure {filepath}: {e}")
             return
-            
+          
         models_to_process = []
 
         # --- BIO-UNIT LOGIC ---
@@ -684,7 +712,104 @@ class view:
                 ignore_ligands=ignore_ligands)
             if not self._is_live: # Only call show() if it hasn't been called
                 self.show()
+    
+
+    def align_objects_to_first(self):
+        """
+        Aligns each object's first frame to the first object's first frame.
+        All subsequent frames within each object maintain their relative positions.
         
+        This preserves internal dynamics/trajectories while aligning the objects.
+        """
+        if len(self.objects) < 2:
+            print("Need at least 2 objects to align.")
+            return
+        
+        # Get reference coordinates from first object's first frame
+        ref_obj = self.objects[0]
+        if not ref_obj['frames'] or len(ref_obj['frames'][0]['coords']) == 0:
+            print("First object has no coordinates.")
+            return
+        
+        ref_coords = np.array(ref_obj['frames'][0]['coords'])
+        
+        print(f"Aligning all objects to '{ref_obj['name']}' (preserving internal dynamics)...")
+        
+        # Align each subsequent object
+        for i, obj in enumerate(self.objects[1:], start=1):
+            if not obj['frames'] or len(obj['frames']) == 0:
+                continue
+                
+            # Get the first frame of this object
+            first_frame_coords = np.array(obj['frames'][0]['coords'])
+            
+            # Check if alignment is possible
+            if first_frame_coords.shape[0] != ref_coords.shape[0]:
+                print(f"  Skipped '{obj['name']}' (different size: {first_frame_coords.shape[0]} vs {ref_coords.shape[0]})")
+                continue
+            
+            # Calculate the alignment transformation from this object's first frame to reference
+            # This gives us the rotation matrix and translation
+            first_frame_mean = first_frame_coords.mean(axis=0, keepdims=True)
+            first_frame_centered = first_frame_coords - first_frame_mean
+            
+            ref_mean = ref_coords.mean(axis=0, keepdims=True)
+            ref_centered = ref_coords - ref_mean
+            
+            # Get rotation matrix using Kabsch
+            R = kabsch(first_frame_centered, ref_centered)
+            
+            # Apply the SAME transformation to ALL frames in this object
+            for frame_idx, frame in enumerate(obj['frames']):
+                coords = np.array(frame['coords'])
+                
+                # Apply the transformation: center, rotate, translate to ref position
+                coords_centered = coords - first_frame_mean
+                coords_rotated = coords_centered @ R
+                coords_aligned = coords_rotated + ref_mean
+                
+                frame['coords'] = coords_aligned.tolist()
+            
+            print(f"  Aligned '{obj['name']}' ({len(obj['frames'])} frames)")    
+
+
+    def normalize_zoom(self):
+        """
+        Ensures all objects use the same zoom level by calculating a global maxExtent.
+        Call this after adding all objects but before show().
+        """
+        if not self.objects:
+            return
+        
+        # We need to recalculate maxExtent globally across all objects
+        # This requires accessing the serialized data
+        
+        print("Normalizing zoom across all objects...")
+        
+        # Calculate global center and extent
+        global_coords = []
+        for obj in self.objects:
+            for frame in obj['frames']:
+                if frame.get('coords'):
+                    global_coords.extend(frame['coords'])
+        
+        if not global_coords:
+            return
+        
+        coords_array = np.array(global_coords)
+        global_center = coords_array.mean(axis=0)
+        
+        # Calculate max distance from global center
+        max_dist = 0
+        for coord in coords_array:
+            dist = np.linalg.norm(coord - global_center)
+            if dist > max_dist:
+                max_dist = dist
+        
+        # Store this for JavaScript to use
+        self.config['global_max_extent'] = float(max_dist)
+        print(f"Global maxExtent set to: {max_dist:.2f}")
+
 
     def show(self):
         """

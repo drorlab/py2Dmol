@@ -201,6 +201,9 @@ function initializePy2DmolViewer(containerElement) {
             this.objectsData = {};
             this.currentObjectName = null;
             this.currentFrame = -1;
+
+            // NEW JKARA: Store per-object color modes
+            this.objectColorModes = {}; // Map: objectName -> colorMode
             
             // Playback
             this.isPlaying = false;
@@ -249,6 +252,32 @@ function initializePy2DmolViewer(containerElement) {
             this.orthoSlider = null;
 
             this.setupInteraction();
+        }
+
+        // NEW JKARA: Add a new object
+        addObject(name, color = null) {
+
+            this.stopAnimation();
+            this.objectsData[name] = { 
+                maxExtent: 0, 
+                frames: [], 
+                globalCenterSum: new Vec3(0,0,0), 
+                totalAtoms: 0 
+            };
+            
+            // Store the color mode for this object
+            this.objectColorModes[name] = color;
+            
+            this.currentObjectName = name;
+            this.currentFrame = -1;
+
+            const option = document.createElement('option');
+            option.value = name;
+            option.textContent = name;
+            this.objectSelect.appendChild(option);
+            this.objectSelect.value = name;
+
+            this.setFrame(-1);
         }
 
         setClearColor(isTransparent) {
@@ -634,24 +663,25 @@ function initializePy2DmolViewer(containerElement) {
         }
 
         // Add a new object
-        addObject(name) {
-            this.stopAnimation();
-            this.objectsData[name] = { maxExtent: 0, frames: [], globalCenterSum: new Vec3(0,0,0), totalAtoms: 0 };
-            this.currentObjectName = name;
-            this.currentFrame = -1;
+        // addObject(name) {
+        //     this.stopAnimation();
+        //     this.objectsData[name] = { maxExtent: 0, frames: [], globalCenterSum: new Vec3(0,0,0), totalAtoms: 0 };
+        //     this.currentObjectName = name;
+        //     this.currentFrame = -1;
 
-            const option = document.createElement('option');
-            option.value = name;
-            option.textContent = name;
-            this.objectSelect.appendChild(option);
-            this.objectSelect.value = name;
+        //     const option = document.createElement('option');
+        //     option.value = name;
+        //     option.textContent = name;
+        //     this.objectSelect.appendChild(option);
+        //     this.objectSelect.value = name;
 
-            this.setFrame(-1);
-        }
+        //     this.setFrame(-1);
+        // }
 
         // Add a frame (data is raw parsed JSON)
         addFrame(data, objectName) {
             
+
             let targetObjectName = objectName;
             if (!targetObjectName) {
                 console.warn("addFrame called without objectName, using current view.");
@@ -665,11 +695,17 @@ function initializePy2DmolViewer(containerElement) {
                 targetObjectName = "0";
             }
             
+            // if (!this.objectsData[targetObjectName]) {
+            //      console.error(`addFrame: Object '${targetObjectName}' does not exist.`);
+            //      console.warn(`addFrame: Object '${targetObjectName}' not found. Creating it.`);
+            //      this.addObject(targetObjectName);
+            // }
+
+            // NEW JKARA: use this instead of the above
             if (!this.objectsData[targetObjectName]) {
-                 console.error(`addFrame: Object '${targetObjectName}' does not exist.`);
-                 console.warn(`addFrame: Object '${targetObjectName}' not found. Creating it.`);
-                 this.addObject(targetObjectName);
-            }
+                    console.error(`addFrame: Object '${targetObjectName}' does not exist and should have been created first!`);
+                    return; // Don't add frame to non-existent object
+                }
 
             const object = this.objectsData[targetObjectName];
             object.frames.push(data);
@@ -696,20 +732,28 @@ function initializePy2DmolViewer(containerElement) {
             
             const globalCenter = (object.totalAtoms > 0) ? object.globalCenterSum.mul(1 / object.totalAtoms) : new Vec3(0,0,0);
 
-            // Recalculate maxExtent for all frames using the new global center
-            let maxDistSq = 0;
-            for (const frame of object.frames) {
-                if (frame && frame.coords) {
-                    for (let i = 0; i < frame.coords.length; i++) {
-                        const c = frame.coords[i];
-                        const coordVec = new Vec3(c[0], c[1], c[2]);
-                        const centeredCoord = coordVec.sub(globalCenter);
-                        const distSq = centeredCoord.dot(centeredCoord);
-                        if (distSq > maxDistSq) maxDistSq = distSq;
+            // NEW JKARA: change this section
+            // Check if we have a global maxExtent from config
+            const config = window.viewerConfig || {};
+            if (config.global_max_extent && config.global_max_extent > 0) {
+                // Use the global maxExtent for all objects
+                object.maxExtent = config.global_max_extent;
+            } else {
+                // Recalculate maxExtent for this object only (old behavior)
+                let maxDistSq = 0;
+                for (const frame of object.frames) {
+                    if (frame && frame.coords) {
+                        for (let i = 0; i < frame.coords.length; i++) {
+                            const c = frame.coords[i];
+                            const coordVec = new Vec3(c[0], c[1], c[2]);
+                            const centeredCoord = coordVec.sub(globalCenter);
+                            const distSq = centeredCoord.dot(centeredCoord);
+                            if (distSq > maxDistSq) maxDistSq = distSq;
+                        }
                     }
                 }
+                object.maxExtent = Math.sqrt(maxDistSq);
             }
-            object.maxExtent = Math.sqrt(maxDistSq);
 
             if (!this.isPlaying) {
                 this.setFrame(object.frames.length - 1);
@@ -735,6 +779,7 @@ function initializePy2DmolViewer(containerElement) {
         }
 
         // Set the current frame and render it
+        // NEW JKARA: updated
         setFrame(frameIndex) {
             frameIndex = parseInt(frameIndex);
             
@@ -755,7 +800,6 @@ function initializePy2DmolViewer(containerElement) {
                 clearCanvas();
                 if (this.paeRenderer) { this.paeRenderer.setData(null); }
                 this.updateUIControls();
-                // Prevent "spinning wheel" on reload
                 this.setUIEnabled(true); 
                 return;
             }
@@ -767,7 +811,7 @@ function initializePy2DmolViewer(containerElement) {
                 clearCanvas();
                 if (this.paeRenderer) { this.paeRenderer.setData(null); }
                 this.updateUIControls();
-                this.setUIEnabled(true); // Enable, even if frame is invalid (so user can change obj)
+                this.setUIEnabled(true);
                 return;
             }
 
@@ -782,10 +826,30 @@ function initializePy2DmolViewer(containerElement) {
                 this.paeRenderer.setData(data.pae || null);
             }
             
+            // UPDATE COLOR DROPDOWN to reflect current object's color
+            // Find the colorSelect element (it's defined globally in the init code)
+            const colorSelect = containerElement.querySelector('#colorSelect');
+            if (colorSelect && this.currentObjectName) {
+                const objColor = this.objectColorModes[this.currentObjectName];
+                if (objColor) {
+                    // Check if this color value exists in the dropdown
+                    const optionExists = Array.from(colorSelect.options).some(opt => opt.value === objColor);
+                    if (optionExists) {
+                        colorSelect.value = objColor;
+                    } else {
+                        // It's a custom hex color - add it temporarily if not there
+                        // Or just set to 'auto' as fallback
+                        colorSelect.value = 'auto';
+                    }
+                } else {
+                    // No object-specific color, use global
+                    colorSelect.value = this.colorMode;
+                }
+            }
+            
             this.updateUIControls(); // Update slider value
             this.setUIEnabled(true); // Make sure controls are enabled
         }
-
         // Update UI element states (e.g., disabled)
         setUIEnabled(enabled) {
              this.playButton.disabled = !enabled;
@@ -1118,15 +1182,34 @@ function initializePy2DmolViewer(containerElement) {
         }
         
         // Calculate segment colors (chain or rainbow)
+        // NEW JKARA: updated
         _calculateSegmentColors() {
             const n = this.coords.length;
             const m = this.segmentIndices.length;
+           
+            // Get the effective color mode for the current object
+            let effectiveColorMode = this.colorMode; // Global default
             
-            let effectiveColorMode = this.colorMode;
+            // CHECK OBJECT-SPECIFIC COLOR FIRST
+            if (this.currentObjectName && this.objectColorModes[this.currentObjectName]) {
+                effectiveColorMode = this.objectColorModes[this.currentObjectName];
+            }
+            
+            // Handle 'auto' resolution AFTER getting the effective mode
             if (effectiveColorMode === 'auto') {
                 effectiveColorMode = this.resolvedAutoColor || 'rainbow';
             }
             
+            // Check if it's a custom hex color (starts with #)
+            const isCustomColor = effectiveColorMode && effectiveColorMode.startsWith('#');
+            
+            if (isCustomColor) {
+                // Use the custom hex color for all segments
+                const customRgb = hexToRgb(effectiveColorMode);
+                return this.segmentIndices.map(() => this._applyPastel(customRgb));
+            }
+            
+            // Rest of the existing logic for chain/rainbow colors
             const chainIndexMap = new Map();
             if (effectiveColorMode === 'chain' && this.chains.length > 0) {
                 for (const chainId of this.chains) {
@@ -1160,7 +1243,6 @@ function initializePy2DmolViewer(containerElement) {
                 else { // rainbow
                     const scale = this.chainRainbowScales[segInfo.chainId];
                     if (scale) { 
-                        // Use the selected rainbow function
                         color = rainbowFunc(segInfo.colorIndex, scale.min, scale.max); 
                     }
                     else { color = grey; }
@@ -1964,11 +2046,21 @@ function initializePy2DmolViewer(containerElement) {
     
     // 5. Setup general controls
     const colorSelect = containerElement.querySelector('#colorSelect');
-    
+
     colorSelect.value = config.color; // Set dropdown value from config
-    
+
     colorSelect.addEventListener('change', (e) => {
-        renderer.colorMode = e.target.value;
+        const newColor = e.target.value;
+        
+        // Update the CURRENT OBJECT's color mode
+        if (renderer.currentObjectName) {
+            renderer.objectColorModes[renderer.currentObjectName] = newColor;
+        }
+        
+        // Also update global color mode
+        renderer.colorMode = newColor;
+        
+        // Recalculate colors and render
         renderer.colors = renderer._calculateSegmentColors();
         renderer.render();
     });
@@ -2059,9 +2151,10 @@ function initializePy2DmolViewer(containerElement) {
         }
     };
 
+    // NEW JKARA: updated
     // 8. Add function for Python to start a new object
-    const handlePythonNewObject = (name) => {
-        renderer.addObject(name);
+    const handlePythonNewObject = (name, color = null) => {
+        renderer.addObject(name, color);
     };
 
     // 9. Add function for Python to clear everything
@@ -2081,64 +2174,69 @@ function initializePy2DmolViewer(containerElement) {
 
     <!-- 11. Load initial data
     if (window.staticObjectData && window.staticObjectData.length > 0) {
-        <!-- === STATIC MODE (from show()) ===
+        // === STATIC MODE (from show()) ===
         try {
-            <!-- Loop over all objects (NEW STRUCTURE)
+            
+            // Loop over all objects (NEW STRUCTURE)
             for (const obj of window.staticObjectData) {
                 if (obj.name && obj.frames && obj.frames.length > 0) {
                     
-                    // Get the static data from the *object* level
                     const staticChains = obj.chains;
                     const staticAtomTypes = obj.atom_types;
+                    const objColor = obj.color;
+                    
                     
                     // Loop through the "light" frames
                     for (let i = 0; i < obj.frames.length; i++) {
-                        const lightFrame = obj.frames[i]; // This only has coords/plddts/pae
+                        const lightFrame = obj.frames[i];
                         
-                        // Re-construct the full frame data expected by addFrame
                         const fullFrameData = {
                             coords: lightFrame.coords,
                             plddts: lightFrame.plddts,
-                            pae: lightFrame.pae, // PAE is per-frame
+                            pae: lightFrame.pae,
                             chains: staticChains,
                             atom_types: staticAtomTypes
                         };
                         
-                        // Pass the re-hydrated frame to the renderer
+                        // First frame creates the object with color
+                        if (i === 0) {
+                            renderer.addObject(obj.name, objColor);
+                        }
+                        
                         renderer.addFrame(fullFrameData, obj.name);
                     }
                 }
             }
-            <!-- Set view to the first frame of the first object
-            if (window.staticObjectData.length > 0) {
-                renderer.currentObjectName = window.staticObjectData[0].name;
-                renderer.objectSelect.value = window.staticObjectData[0].name;
-                renderer.setFrame(0);
+                // Set view to the first frame of the first object
+                if (window.staticObjectData.length > 0) {
+                    renderer.currentObjectName = window.staticObjectData[0].name;
+                    renderer.objectSelect.value = window.staticObjectData[0].name;
+                    renderer.setFrame(0);
+                }
+            } catch (error) {
+                console.error("Error loading static object data:", error);
+                renderer.setFrame(-1); // Start empty on error
             }
-        } catch (error) {
-            console.error("Error loading static object data:", error);
-            renderer.setFrame(-1); <!-- Start empty on error
-        }
-        
-    } else if (window.proteinData && window.proteinData.coords && window.proteinData.coords.length > 0) {
-        // === HYBRID MODE (first frame) ===
-        try {
-            // Load the single, statically-injected frame into "0"
-            renderer.addFrame(window.proteinData, "0"); 
-        } catch (error) {
-            console.error("Error loading initial data:", error);
+            
+        } else if (window.proteinData && window.proteinData.coords && window.proteinData.coords.length > 0) {
+            // === HYBRID MODE (first frame) ===
+            try {
+                // Load the single, statically-injected frame into "0"
+                renderer.addFrame(window.proteinData, "0"); 
+            } catch (error) {
+                console.error("Error loading initial data:", error);
+                renderer.setFrame(-1);
+            }
+        } else {
+            // === EMPTY DYNAMIC MODE ===
+            // No initial data, start with an empty canvas.
             renderer.setFrame(-1);
         }
-    } else {
-        // === EMPTY DYNAMIC MODE ===
-        // No initial data, start with an empty canvas.
-        renderer.setFrame(-1);
-    }
-    
-    // After data load, trigger ortho slider to set correct initial focal length
-    if (orthoSlider) {
-        orthoSlider.dispatchEvent(new Event('input'));
-    }
+        
+        // After data load, trigger ortho slider to set correct initial focal length
+        if (orthoSlider) {
+            orthoSlider.dispatchEvent(new Event('input'));
+        }
 
 
     <!-- 12. Start the main animation loop
